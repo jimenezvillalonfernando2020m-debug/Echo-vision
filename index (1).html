@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>EchoVision: simulación 3D</title>
+<style>
+:root{--bg:#eef0f2;--fg:#1d1d1b;--card:rgba(255,255,255,.88);--ac:#d9480f;--ok:#2f9e44;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16171a;--fg:#f0f0ee;--card:rgba(34,36,40,.88);--ac:#ff922b;--ok:#51cf66}}
+:root[data-theme="dark"]{--bg:#16171a;--fg:#f0f0ee;--card:rgba(34,36,40,.88);--ac:#ff922b;--ok:#51cf66}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;overflow:hidden;touch-action:none}
+canvas{display:block;width:100%;height:100%}
+.hud{position:absolute;top:calc(env(safe-area-inset-top,0px) + 10px);left:10px;right:10px;display:flex;gap:10px;align-items:flex-start;justify-content:space-between;pointer-events:none}
+.card{background:var(--card);border-radius:12px;padding:10px 14px;font-size:14px;line-height:1.4;max-width:230px}
+.bar{height:10px;border-radius:5px;background:rgba(128,128,128,.3);margin:6px 0;overflow:hidden}
+#fill{height:100%;width:0;background:var(--ac)}
+pre{margin:6px 0 0;font:11px/1.3 ui-monospace,monospace;background:rgba(0,0,0,.8);color:#7CFC8A;border-radius:6px;padding:6px;height:5.2em;overflow:hidden}
+#vib{display:inline-block;font-size:18px}
+.shake{animation:sh .12s infinite}
+@keyframes sh{0%{transform:translateX(-2px) rotate(-6deg)}50%{transform:translateX(2px) rotate(6deg)}100%{transform:translateX(-2px) rotate(-6deg)}}
+.col{display:flex;flex-direction:column;gap:8px;pointer-events:auto}
+button{font:inherit;color:var(--fg);background:var(--card);border:1px solid rgba(128,128,128,.4);border-radius:12px;padding:8px 12px}
+button.on{border-color:var(--ok)}
+label{font-size:12px;display:block;margin-top:4px;pointer-events:auto}
+input[type=range]{width:100%}
+.pad{position:absolute;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);left:14px;display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(2,56px);gap:6px}
+.pad button{font-size:22px;padding:0;user-select:none;-webkit-user-select:none}
+#up{grid-column:2}#lf{grid-row:2;grid-column:1}#dn{grid-row:2;grid-column:2}#rt{grid-row:2;grid-column:3}
+.note{position:absolute;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);max-width:190px;font-size:12px}
+</style></head><body>
+<canvas id="c"></canvas>
+<div class="hud">
+  <div class="card" style="pointer-events:auto">
+    <b>EchoVision</b> <span id="vib">📳</span><br>
+    <span id="txt">Distancia: —</span>
+    <div class="bar"><div id="fill"></div></div>
+    <label>Umbral de alerta: <b id="thv">100</b> cm<input id="th" type="range" min="30" max="300" step="10" value="100"></label>
+    <pre id="ser"></pre>
+  </div>
+  <div class="col">
+    <button id="snd">🔇 Buzzer</button>
+    <button id="vbtn" class="on">📳 Vibración</button>
+  </div>
+</div>
+<div class="pad">
+  <button id="up">▲</button><button id="lf">◀</button><button id="dn">▼</button><button id="rt">▶</button>
+</div>
+<div class="card note">🟦 Obstáculos que el sensor sí ve (muros, objetos grandes, objeto a la altura de la cabeza). ⬜ Objeto bajo: el sensor <b>no</b> lo detecta (limitación del proyecto).</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const RANGE=4, ANGLES=[-12,0,12]; // HC-SR04: alcance ~4 m, cono angosto
+let threshold=100; // cm, igual que el código Arduino
+const dark=matchMedia("(prefers-color-scheme: dark)").matches;
+const canvas=document.getElementById("c");
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(dark?0x16171a:0xdfe6ec);
+const cam=new THREE.PerspectiveCamera(60,1,0.1,100);
+scene.add(new THREE.HemisphereLight(0xffffff,0x667788,1));
+const sun=new THREE.DirectionalLight(0xffffff,.6);sun.position.set(5,10,5);scene.add(sun);
+scene.add(new THREE.GridHelper(40,40,0x888888,0x888888));
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(40,40),new THREE.MeshLambertMaterial({color:dark?0x24272c:0xf2f2ee}));
+floor.rotation.x=-Math.PI/2;floor.position.y=-0.01;scene.add(floor);
+
+// [x,z,w,d,alto,y_base,color,detectable]
+const defs=[
+ [0,0,2,2,1.6,0,0x4c6ef5,1],        // objeto grande
+ [-4,-4,1,1,2,0,0x4c6ef5,1],
+ [4,-3,2,1,1.2,0,0x4c6ef5,1],
+ [0,-9,8,1,2.2,0,0x4c6ef5,1],       // muro
+ [-3,4,1.2,3,0.3,0,0xadb5bd,0],     // objeto bajo (no detectable)
+ [4,4,2.5,.3,.5,1.4,0xe8590c,1]     // letrero a la altura de la cabeza
+];
+const obs=[],boxes=[];
+defs.forEach(([x,z,w,d,h,y0,col,det])=>{
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),new THREE.MeshLambertMaterial({color:col}));
+  m.position.set(x,y0+h/2,z);scene.add(m);boxes.push({x,z,w,d});
+  if(det)obs.push(m);
+});
+
+// Persona con lentes y sensor (el frente es -Z)
+const p=new THREE.Group();
+const body=new THREE.Mesh(new THREE.CylinderGeometry(.3,.3,1.4,16),new THREE.MeshLambertMaterial({color:0xf08c00}));body.position.y=.7;
+const head=new THREE.Mesh(new THREE.SphereGeometry(.22,16,16),new THREE.MeshLambertMaterial({color:0xffd8a8}));head.position.y=1.6;
+const frame=new THREE.Mesh(new THREE.BoxGeometry(.38,.08,.05),new THREE.MeshBasicMaterial({color:0x111111}));frame.position.set(0,1.62,-.2);
+const sMat=new THREE.MeshBasicMaterial({color:0xced4da});
+[-.07,.07].forEach(x=>{const s=new THREE.Mesh(new THREE.CylinderGeometry(.035,.035,.05,12),sMat);s.rotation.x=Math.PI/2;s.position.set(x,1.7,-.23);p.add(s)});
+p.add(body,head,frame);p.position.set(0,0,8);scene.add(p);
+
+const lines=ANGLES.map(()=>{
+  const g=new THREE.BufferGeometry().setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
+  const l=new THREE.Line(g,new THREE.LineBasicMaterial({color:0x37b24d}));l.frustumCulled=false;scene.add(l);return l;
+});
+const ray=new THREE.Raycaster();ray.far=RANGE;
+
+// Controles
+const keys={};
+addEventListener("keydown",e=>keys[e.key]=true);addEventListener("keyup",e=>keys[e.key]=false);
+[["up","ArrowUp"],["dn","ArrowDown"],["lf","ArrowLeft"],["rt","ArrowRight"]].forEach(([id,k])=>{
+  const b=document.getElementById(id);
+  b.addEventListener("pointerdown",e=>{e.preventDefault();keys[k]=true});
+  ["pointerup","pointerleave","pointercancel"].forEach(ev=>b.addEventListener(ev,()=>keys[k]=false));
+});
+const th=document.getElementById("th");
+th.oninput=()=>{threshold=+th.value;document.getElementById("thv").textContent=threshold};
+
+// Buzzer y vibración
+let ac=null,soundOn=false,vibOn=true,nextBeep=0;
+const sndBtn=document.getElementById("snd"),vbtn=document.getElementById("vbtn");
+sndBtn.onclick=()=>{
+  try{
+    if(!ac)ac=new (window.AudioContext||window.webkitAudioContext)();
+    ac.resume();soundOn=!soundOn;
+    sndBtn.textContent=soundOn?"🔊 Buzzer":"🔇 Buzzer";sndBtn.classList.toggle("on",soundOn);
+  }catch(e){console.error(e)}
+};
+vbtn.onclick=()=>{vibOn=!vibOn;vbtn.classList.toggle("on",vibOn)};
+function beep(freq,dur){
+  const o=ac.createOscillator(),g=ac.createGain(),t=ac.currentTime;
+  o.frequency.value=freq;o.type="square";
+  g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.12,t+.01);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  o.connect(g);g.connect(ac.destination);o.start(t);o.stop(t+dur+.02);
+}
+
+function blocked(x,z){
+  if(Math.abs(x)>18||Math.abs(z)>18)return true;
+  return boxes.some(b=>Math.abs(x-b.x)<b.w/2+.4&&Math.abs(z-b.z)<b.d/2+.4);
+}
+function resize(){const w=innerWidth,h=innerHeight;renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix()}
+addEventListener("resize",resize);resize();
+
+const txt=document.getElementById("txt"),fill=document.getElementById("fill"),ser=document.getElementById("ser"),vib=document.getElementById("vib");
+const log=[];let tick=0,yaw=0,last=performance.now(),cm=null;
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt=Math.min((now-last)/1000,.05);last=now;
+  if(keys.ArrowLeft||keys.a)yaw+=1.8*dt;
+  if(keys.ArrowRight||keys.d)yaw-=1.8*dt;
+  const fx=-Math.sin(yaw),fz=-Math.cos(yaw);
+  let v=0;if(keys.ArrowUp||keys.w)v=2;if(keys.ArrowDown||keys.s)v=-1.5;
+  const nx=p.position.x+fx*v*dt,nz=p.position.z+fz*v*dt;
+  if(!blocked(nx,p.position.z))p.position.x=nx;
+  if(!blocked(p.position.x,nz))p.position.z=nz;
+  p.rotation.y=yaw;p.updateMatrixWorld(true);
+
+  // Sensor ultrasónico a la altura de la cabeza
+  const origin=new THREE.Vector3(p.position.x,1.7,p.position.z);
+  let best=Infinity;
+  ANGLES.forEach((a,i)=>{
+    const r=THREE.MathUtils.degToRad(a)+yaw;
+    const dir=new THREE.Vector3(-Math.sin(r),0,-Math.cos(r));
+    ray.set(origin,dir);
+    const hit=ray.intersectObjects(obs,false)[0];
+    const d=hit?hit.distance:RANGE;
+    if(hit&&d<best)best=d;
+    const pos=lines[i].geometry.attributes.position;
+    const end=origin.clone().addScaledVector(dir,d);
+    pos.setXYZ(0,origin.x,origin.y,origin.z);pos.setXYZ(1,end.x,end.y,end.z);pos.needsUpdate=true;
+    lines[i].material.color.set(hit&&d*100<=threshold?0xf03e3e:0x37b24d);
+  });
+  cm=best<Infinity?Math.round(best*100):null;
+  const alert=cm!==null&&cm<=threshold;
+
+  txt.textContent=cm===null?"Distancia: fuera de rango":"Distancia: "+cm+" cm";
+  fill.style.width=cm===null?"0%":Math.max(0,100*(1-cm/(RANGE*100)))+"%";
+  vib.classList.toggle("shake",alert&&vibOn);
+
+  // Igual que el loop de Arduino: cada 100 ms
+  tick+=dt;
+  if(tick>=.1){
+    tick=0;
+    log.push("Distancia: "+(cm===null?"--":cm)+" cm");
+    if(alert)log.push("VIBRANDO");
+    while(log.length>4)log.shift();
+    ser.textContent=log.join("\n");
+    if(alert&&vibOn&&navigator.vibrate){try{navigator.vibrate(90)}catch(e){}}
+  }
+
+  // Buzzer: más cerca, más rápido y más agudo
+  if(alert&&soundOn&&ac&&now/1000>nextBeep){
+    const k=cm/threshold;
+    beep(500+(1-k)*800,.08);
+    nextBeep=now/1000+.08+k*.6;
+  }
+
+  cam.position.set(p.position.x-fx*5,3.8,p.position.z-fz*5);
+  cam.lookAt(p.position.x+fx*2,1,p.position.z+fz*2);
+  renderer.render(scene,cam);
+}
+requestAnimationFrame(loop);
+</script>
+</body></html>
